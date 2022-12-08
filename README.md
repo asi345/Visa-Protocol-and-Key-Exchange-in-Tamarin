@@ -12,7 +12,7 @@ In this lab, I start by modelling the basic unsigned Diffie-Hellman protocol in 
 
 The protocol figure:
 
-![IKEv1 protocol][./IKEv1.png "Nice"]
+![IKEv1 protocol](./IKEv1.png "Nice")
 
 Detailed task description and foundations are in the file **tamarin-lab1.pdf**.
 
@@ -26,7 +26,7 @@ The goal of this lab is to deepen modeling and analysis skills, with the use cas
 
 The protocol figure:
 
-![Visa contactless transaction][./EMV.png "Nice"]
+![Visa contactless transaction](./EMV.png "Nice")
 
 Detailed task description and foundations are in the file **tamarin-lab2.pdf**.
 
