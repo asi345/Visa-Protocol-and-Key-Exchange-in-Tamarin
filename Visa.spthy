@@ -1,0 +1,258 @@
+theory Visa
+
+begin
+
+builtins:  signing, asymmetric-encryption
+
+functions: f/2, MAC/3, MACprime/2
+
+/////////////////////////////////////////////////////
+//                     Rules                       //
+/////////////////////////////////////////////////////
+
+// ========= Terminal-Issuer Channel ========== //
+rule Terminal_Issuer_Channel:
+    [ Send(Sender, Recipient, channelID, msg) ]
+  -->
+    [ Recv(Sender, Recipient, channelID, msg) ]
+
+// =========== Application Transaction Counter ==========//
+rule Generate_ATC:
+    [ Fr(~ATC) ]-->[ !ATC(~ATC), Out(~ATC) ]
+
+// =============== Card setup ================ //
+rule Create_Card:
+    [ Fr(~PAN),//card number
+      Fr(~mk),//symmetric key shared with issuer
+      Fr(~privkCard)//card's private key
+    ]
+  -->
+    [ !SharedKey(~PAN, ~mk),
+      //annotate the issuing bank
+      !IssuedBy(~PAN, $Issuer),
+      //PKI
+      !LtkCard(~PAN, ~privkCard),
+      !Pk(~PAN, pk(~privkCard)),
+      Out(pk(~privkCard))
+    ]
+
+// ============== Compromise =============== //
+rule Compromise_Card:
+    [ !LtkCard(~PAN, ~privkCard) ]
+  --[ Compromise(~PAN) ]->
+    [ Out(<~PAN, ~privkCard>) ]
+
+rule Compromise_Shared_Key:
+    [ !IssuedBy(~PAN, $Issuer),
+      !SharedKey(~PAN, ~mk) ]
+  --[ Compromise($Issuer),
+      Compromise(~PAN) ]->
+    [ Out(~mk) ]
+
+// =========== Get Processing Options ============ //
+rule Terminal_Sends_GPO:
+    let PDOL = <$amount, ~un>
+    in
+    [ Fr(~un) ]
+  -->
+    [ Out(<'GET_PROCESSING_OPTIONS', PDOL>),
+      Terminal_Sent_GPO($Terminal, PDOL) ]
+
+rule Card_Responds_To_GPO:
+    let skc = f(~mk, ATC)
+        PDOL = <$amount, ~un>
+        AC = MAC(skc, PDOL, ATC)
+        transaction = <~PAN, PDOL, ATC, AC>
+        AIP = 'fDDA'
+    in
+    [ !SharedKey(~PAN, ~mk),
+      Fr(~nc),
+      In(<'GET_PROCESSING_OPTIONS', PDOL>),
+      !IssuedBy(~PAN, $Issuer),
+      !ATC(ATC)
+    ]
+  --[ Once(<~PAN, ATC, 'Card'>) //used in the restriction 'once'
+    ]->
+    [ Card_Responded_To_GPO(~PAN, $Issuer, ~mk, ATC, ~nc, skc, $amount, ~un, PDOL, AC, AIP, transaction),
+      Out(<AIP, 'ARQC', ATC, AC>)
+    ]
+
+rule Card_Responds_To_GPO_2:
+    let skc = f(~mk, ATC)
+        PDOL = <$amount, ~un>
+        AC = MAC(skc, PDOL, ATC)
+        transaction = <~PAN, PDOL, ATC, AC>
+        AIP = 'fDDA'
+    in
+    [ !SharedKey(~PAN, ~mk),
+      Fr(~nc),
+      In(<'GET_PROCESSING_OPTIONS', PDOL>),
+      !IssuedBy(~PAN, $Issuer),
+      !ATC(ATC)
+    ]
+  --[ Once(<~PAN, ATC, 'Card'>) //used in the restriction 'once'
+    ]->
+    [ Card_Responded_To_GPO(~PAN, $Issuer, ~mk, ATC, ~nc, skc, $amount, ~un, PDOL, AC, AIP, transaction),
+      Out(<AIP, 'TC', ATC, AC>)
+    ] 
+
+// ============== Read Records ==================== //
+
+rule Terminal_Sends_Read:
+    let AIP = 'fDDA'
+    in
+    [ Terminal_Sent_GPO($Terminal, PDOL),
+      !ATC(ATC),
+      In(<AIP, CID, AC>) // I did not take ATC with In() rule but with ATC() rule because otherwise Tamarin can not bind
+      // ATC with the output of Card_Responded_To_GPO but instead creates unnecessary instances of other rules with a
+      // fresh new ATC, which breaks the system. But this way, it works perfectly fine and in compliance with the protocol
+    ]
+  --[]->
+    [ Terminal_Sent_Read($Terminal, PDOL, AIP, CID, ATC, AC),
+      Out('READ_RECORD') ]
+
+rule Card_Responds_To_Read:
+    let sm = <un, $amount, nc, ATC, AIP>
+        SDAD = sign(sm, kC)
+    in
+    [ Card_Responded_To_GPO(PAN, $Issuer, mk, ATC, nc, skc, $amount, un, PDOL, AC, AIP, transaction),
+      In('READ_RECORD'),
+      !LtkCard(PAN, kC),
+      !Pk(PAN, pkC) ]
+  --[ Running(PAN, 'Terminal', <'Card', 'Terminal', transaction>),
+      Running(PAN, $Issuer, <'Card', 'Issuer', transaction>) ]->
+    [ Card_Responded_To_Read(PAN, $Issuer, mk, ATC, nc, skc, $amount, un, PDOL, AC, AIP, transaction, kC),
+      Out(<SDAD, nc, PAN>) ]
+
+// =========== Offline Data Authentication ============ //
+
+rule Terminal_Authenticates:
+    let PDOL = <$amount, ~un>
+        sm = <~un, $amount, nc, ATC, AIP>
+    in
+    [ Terminal_Sent_Read($Terminal, PDOL, AIP, CID, ATC, AC),
+      !Pk(PAN, pkC),
+      In(<SDAD, nc>) // I did not take pan with In() rule but with Pk(PAN, pkC) rule because otherwise Tamarin can not bind
+      // PAN with the output of Card_Responds_To_Read but instead creates unnecessary instances of other rules with a
+      // fresh new PAN, which breaks the system. But this way, it works perfectly fine and in compliance with the protocol
+    ]
+  --[ Eq(true, verify(SDAD, sm, pkC)) ]->
+    [ Terminal_Ready_To_Send_AC($Terminal, PAN, PDOL, CID, ATC, AC) ]
+
+// ============== Offline Authorization ============== //
+rule Terminal_Receives_TC:
+    let transaction = <~PAN, PDOL, ATC, AC> in
+    [ Terminal_Ready_To_Send_AC($Terminal, ~PAN, PDOL, 'TC', ATC, AC),
+      !IssuedBy(~PAN, $Issuer) ]
+  --[ Commit('Terminal', ~PAN, <'Card', 'Terminal', transaction>) ]->
+    [ ]
+
+
+// ============== Online Authorization ============== //
+
+rule Terminal_Receives_ARQC:
+    let transaction = <~PAN, PDOL, ATC, AC>
+    in
+    [ Terminal_Ready_To_Send_AC($Terminal, ~PAN, PDOL, 'ARQC', ATC, AC),
+      !IssuedBy(~PAN, $Issuer),
+      Fr(channelID) ]
+  --[ Running($Terminal, $Issuer, <'Terminal', 'Issuer', transaction>) ]->
+    [ Terminal_Sent_AC($Terminal, ~PAN, PDOL, 'ARQC', ATC, AC, channelID),
+      Send($Terminal, $Issuer, <channelID, '1'>, transaction) ]
+
+rule Terminal_Commits_Online:
+    let transaction = <~PAN, PDOL, ATC, AC>
+    in
+    [ Terminal_Sent_AC($Terminal, ~PAN, PDOL, 'ARQC', ATC, AC, channelID),
+      Recv($Issuer, $Terminal, <channelID, '2'>, <'ACCEPTED', ARPC>) ]
+  --[ Online(),
+      Commit('Terminal', ~PAN, <'Card', 'Terminal', transaction>),
+      Commit($Terminal, $Issuer, <'Issuer', 'Terminal', transaction>) ]->
+    []
+
+// ================== Issuer =================== //
+rule Issuer_Receives_AC:
+    let AC = MAC(f(~mk, ATC), PDOL, ATC)
+        ARPC = MACprime(f(~mk, ATC), AC)
+        transaction = <~PAN, PDOL, ATC, AC>
+    in
+    [ Recv($Terminal, $Issuer, <channelID, '1'>, transaction),
+      !SharedKey(~PAN, ~mk),
+      !IssuedBy(~PAN, $Issuer) ]
+  --[ Once(<~PAN, ATC, 'Issuer'>), //used in the restriction 'once'
+      Running($Issuer, $Terminal, <'Issuer', 'Terminal', transaction>) ]->
+    [ Issuer_Commits($Issuer, $Terminal, transaction, channelID, ARPC) ]
+
+rule Issuer_Commits:
+    let transaction = <~PAN, PDOL, ATC, AC> in
+    [ Issuer_Commits($Issuer, $Terminal, transaction, channelID, ARPC) ]
+  --[ Commit($Issuer, ~PAN, <'Card', 'Issuer', transaction>),
+      Commit($Issuer, $Terminal, <'Terminal', 'Issuer', transaction>) ]->
+    [ Send($Issuer, $Terminal, <channelID, '2'>, <'ACCEPTED', ARPC>) ]
+
+
+/////////////////////////////////////////////////////
+//                 Restrictions                    //
+/////////////////////////////////////////////////////
+restriction equal:
+  "All a b #i. Eq(a, b)@i ==> a = b"
+
+restriction once: //checks that ATC is different per card session
+  "All a #i #j. Once(a)@i & Once(a)@j ==> #i = #j"
+
+////////////////////////////////////////////
+//              Sanity Check              //
+////////////////////////////////////////////
+  
+lemma executable_offline:
+  exists-trace
+  "Ex PAN t #i #j.
+    not(Online()@j) &
+    //Card-Terminal agreement
+    i < j &
+    Running(PAN, 'Terminal', <'Card', 'Terminal', t>)@i &
+    Commit('Terminal', PAN, <'Card', 'Terminal', t>)@j &
+    not (Ex A #a. Compromise(A)@a)"
+
+lemma executable_online:
+  exists-trace
+  "Ex PAN Issuer t #i #j #k #l.
+    Online()@j &
+    //Card-Terminal agreement
+    i < j &
+    Running(PAN, 'Terminal', <'Card', 'Terminal', t>)@i &
+    Commit('Terminal', PAN, <'Card', 'Terminal', t>)@j &
+    //Card-Issuer agreement
+    k < l &
+    Running(PAN, Issuer, <'Card', 'Issuer', t>)@k &
+    Commit(Issuer, PAN, <'Card', 'Issuer', t>)@l &
+    not (Ex A #a. Compromise(A)@a)"
+
+/////////////////////////////////////////////////////
+//           Security Properties                   //
+/////////////////////////////////////////////////////
+
+lemma auth_to_terminal_offline:
+  "All PAN t #i.
+    Commit('Terminal', PAN, <'Card', 'Terminal', t>) @i &
+    not (Ex #r. Compromise(PAN) @r)
+   ==>  (Ex #j. Running(PAN, 'Terminal', <'Card', 'Terminal', t>) @ j)"
+
+lemma auth_to_terminal_online:
+ "All PAN Terminal Issuer t #i #j #k.
+    (Commit('Terminal', PAN, <'Card', 'Terminal', t>) @i &
+    Commit(Terminal, Issuer, <'Issuer', 'Terminal', t>) @j &
+    Online() @k &
+    not (Ex #r. Compromise(PAN) @r) & not (Ex #r. Compromise(Issuer) @r))
+    ==>  ((Ex #j. Running(Issuer, Terminal, <'Issuer', 'Terminal', t>) @ j) &
+          (Ex #j. Running(PAN, 'Terminal', <'Card', 'Terminal', t>) @ j))"
+
+lemma auth_to_issuer:
+ "All PAN Terminal Issuer t #i #j #k.
+    (Commit(Issuer, PAN, <'Card', 'Issuer', t>) @i &
+    Commit(Issuer, Terminal, <'Terminal', 'Issuer', t>) @j &
+    Online() @k &
+    not (Ex #r. Compromise(PAN) @r) & not (Ex #r. Compromise(Issuer) @r))
+    ==>  ((Ex #j. Running(PAN, Issuer, <'Card', 'Issuer', t>) @ j) &
+          (Ex #j. Running(Terminal, Issuer, <'Terminal', 'Issuer', t>) @ j))"
+end
